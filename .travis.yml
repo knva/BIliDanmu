@@ -1,0 +1,4 @@
+﻿language: csharp
+solution: mydanmu.sln
+install:
+  - nuget restore solution-name.sln

@@ -10,6 +10,7 @@ using Newtonsoft.Json.Linq;
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Text;
@@ -18,6 +19,8 @@ using System.Threading.Tasks;
 using System.Xml;
 
 using WebSocketSharp;
+using zlib;
+
 namespace mydanmu.common
 {
     public class GetLiveRoom
@@ -54,15 +57,22 @@ namespace mydanmu.common
 
             //Hashtable hs = new Hashtable();
             //hs.Add("id", "cid:" + roomid);
-            string info = await netApi.CreateGetHttpResponse("https://api.live.bilibili.com/room/v1/Room/get_info?room_id=" + roomid, 100, null);
+            string info = await netApi.CreateGetHttpResponse("https://api.live.bilibili.com/xlive/web-room/v1/index/getInfoByRoom?room_id=" + roomid, 100, null);
+
             var jo = JObject.Parse(info);
-            JObject jo1 = (JObject)jo["data"];
+            JObject jo1 = (JObject)jo["data"]["room_info"];
             roomName = jo1["title"].ToString();
             roomid = Convert.ToInt32(jo1["room_id"].ToString());
 
-            info = await netApi.CreateGetHttpResponse("https://api.live.bilibili.com/api/player?id=cid:" + this.roomid, 100, null);
-            GetDmServer(LoadStr(info));
+            var html = await netApi.CreateGetHttpResponse("https://api.live.bilibili.com/xlive/web-room/v1/index/getDanmuInfo?id="+ roomid + "&type=0", 100, null);
+       
 
+             var josnd = JObject.Parse(html);
+            JObject jo2 = (JObject)josnd["data"]["host_list"][0];
+            serverhost = jo2["host"].ToString();
+            serverport = Convert.ToInt32(jo2["wss_port"].ToString());
+
+          
 
 
         }
@@ -88,7 +98,7 @@ namespace mydanmu.common
         }
         public void LeaveLiveRoomAsync()
         {
-            callback("离开房间");
+            callback("离开房间"+Environment.NewLine);
             linkStats = false;
             t.Dispose();
             ws.CloseAsync(CloseStatusCode.Normal);
@@ -97,7 +107,7 @@ namespace mydanmu.common
         {
             await GetRoomInfo();
             ws = new WebSocket("wss://" + this.serverhost + ":" + this.serverport + "/sub");
-            ws.SetProxy("http://127.0.0.1:8888", "", "");
+            //ws.SetProxy("http://127.0.0.1:8888", "", "");
             ws.OnMessage += (sender, e) =>
             {
                 if (!linkStats)
@@ -157,7 +167,8 @@ namespace mydanmu.common
             jo["roomid"] = Convert.ToInt32(roomid);
             jo["protover"] = 1;
             jo["platform"] = "web";
-            jo["clientver"] = "1.4.7";
+            jo["clientver"] = "1.14.3";
+            jo["type"] = "1";
             string hellopackage = jo.ToString().Replace("\n", "").Replace(" ", "").Replace("\t", "").Replace("\r", "");
             acSocket(7, hellopackage);
 
@@ -195,6 +206,10 @@ namespace mydanmu.common
             decode["wz"] = IPAddress.NetworkToHostOrder(BitConverter.ToInt16(data, offset));
             offset += 2;
             decode["control"] = IPAddress.NetworkToHostOrder(BitConverter.ToInt32(data, offset));
+            offset += 4;
+            decode["type"] = IPAddress.NetworkToHostOrder(BitConverter.ToInt32(data, offset));
+            offset += 4;
+            decode["xdata"] = IPAddress.NetworkToHostOrder(BitConverter.ToInt32(data, offset));
             //Console.WriteLine(decode["Len"]);
             //Console.WriteLine(decode["hLen"]);
             //Console.WriteLine(decode["wz"]);
@@ -202,16 +217,67 @@ namespace mydanmu.common
             return decode;
 
         }
+        /// <summary>
+        /// 复制流
+        /// </summary>
+        /// <param name="input">原始流</param>
+        /// <param name="output">目标流</param>
+        public static void CopyStream(System.IO.Stream input, System.IO.Stream output)
+        {
+            byte[] buffer = new byte[2000];
+            int len;
+            while ((len = input.Read(buffer, 0, 2000)) > 0)
+            {
+                output.Write(buffer, 0, len);
+            }
+            output.Flush();
+        }
+        /// <summary>
+        /// 解压缩流
+        /// </summary>
+        /// <param name="sourceStream">需要被解压缩的流</param>
+        /// <returns>解压后的流</returns>
+        private static Stream deCompressStream(Stream sourceStream)
+        {
+            MemoryStream outStream = new MemoryStream();
+            ZOutputStream outZStream = new ZOutputStream(outStream);
+            CopyStream(sourceStream, outZStream);
+            outZStream.finish();
+            return outStream;
+        }
+        /// <summary>
+        /// 解压缩字节数组
+        /// </summary>
+        /// <param name="sourceByte">需要被解压缩的字节数组</param>
+        /// <returns>解压后的字节数组</returns>
+        private static byte[] deCompressBytes(byte[] sourceByte)
+        {
+            MemoryStream inputStream = new MemoryStream(sourceByte);
+            Stream outputStream = deCompressStream(inputStream);
+            byte[] outputBytes = new byte[outputStream.Length];
+            outputStream.Position = 0;
+            outputStream.Read(outputBytes, 0, outputBytes.Length);
+            outputStream.Close();
+            inputStream.Close();
+            return outputBytes;
+        }
+
         private JObject decodeJson(byte[] data, Dictionary<string, int> decode)
         {
             JObject decodejo = new JObject();
 
             if (decode["control"] == 5)
             {
+
                 int datalen = decode["Len"] - decode["hLen"];
                 byte[] rcvdata = new byte[datalen];
                 Buffer.BlockCopy(data, 16, rcvdata, 0, datalen);
-                string str = Encoding.UTF8.GetString(rcvdata);
+
+                var xdata = deCompressBytes(rcvdata);
+                byte[] decodedata = new byte[xdata.Length - 16];
+                Buffer.BlockCopy(xdata, 16, decodedata, 0, xdata.Length-16);
+
+                string str = Encoding.UTF8.GetString(decodedata);
                 decodejo = JObject.Parse(str);
             }
             else if (decode["control"] == 8)
